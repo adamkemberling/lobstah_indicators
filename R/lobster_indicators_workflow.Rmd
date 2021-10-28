@@ -1,0 +1,622 @@
+---
+title: "Lobster Predator Indices"
+author: "Adam A. Kemberling"
+date: "Updated on: `r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float:
+        collapsed: FALSE
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = F, 
+                      warning = F, 
+                      comment = "", 
+                      fig.align = "center", 
+                      fig.height = 6, 
+                      fig.width = 6)
+
+####  Packages  ####
+library(sf)
+library(tidyverse)
+library(targets)
+library(gmRi)
+# library(ggforce)
+library(scales)
+
+# paths
+box_paths <- research_access_paths()
+res_path <- box_paths$res
+
+# Mapping polygons
+new_england <- rnaturalearth::ne_states("united states of america", returnclass = "sf")
+canada <- rnaturalearth::ne_states("canada", returnclass = "sf") 
+
+# Set ggplot theme for figures
+theme_set(theme_bw())
+
+# Set theme up for maps
+map_theme <- list(
+  theme(
+    panel.border       = element_rect(color = "black", fill = "transparent"),
+    plot.background    = element_rect(color = "transparent", fill = "transparent"),
+    line               = element_blank(),
+    axis.title.x       = element_blank(), # turn off titles
+    axis.title.y       = element_blank(),
+    legend.position    = "bottom", 
+    legend.title.align = 0.5)) 
+```
+
+
+`r use_gmri_style_rmd(css_file = "gmri_rmarkdown.css")`
+
+# Lobster Predator Indices
+
+The idea behind the lobster predator index is to use characteristics of the fish community that prey on lobster as a biological indicator for predicting patterns in lobster abundance/biomass/recruitment.
+
+
+## Data Prep
+
+The predator data used is sourced from the northeast trawl survey, conducted by the Northeast Fisheries Science Center. This survey runs every spring and fall sampling the seafloor using trawling gear towed behind a research vessel. Data from the survey includes abundance and size information for fishes found on the Northeastern US shelf.
+
+
+### Trawl Survey Data Prep
+
+Data from the survey is loaded for abundance-based analyses, with some filtering done to remove stratum that are sampled less-frequently following a survey design change in 2008. Following the standard tidy-up steps, each species then has their expected length-weight biomasses estimated using published growth curve equations.
+
+```{r}
+# Load clean trawl data, add length weight data
+nefsc_clean <- gmRi::gmri_survdat_prep(survdat_source = "most recent")
+nefsc_clean <- add_lw_info(nefsc_clean, cutoff = TRUE)
+```
+
+
+### Subsetting Data to the Gulf of Maine
+
+For the predator indices we are narrowing our attention to patterns within the Gulf of Maine. This is done to relate these patterns in predators to lobster observations in the area. These include regional landings, juvenile surveys, and recruitment indices. To do this data is only kept if it is sampled from within trawl stratum that  we typically associate with the Gulf of Maine
+
+**Loading Trawl Survey Strata:**
+
+```{r}
+# Load the strata
+survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))  %>% 
+  janitor::clean_names() %>% 
+  filter(strata >= 01010 ,
+         strata <= 01760,
+         strata != 1310,
+         strata != 1320,
+         strata != 1330,
+         strata != 1350,
+         strata != 1410,
+         strata != 1420,
+         strata != 1490) 
+
+
+# Key to which strata = which regions
+strata_key <- list(
+  "Georges Bank"          = as.character(13:23),
+  "Gulf of Maine"         = as.character(24:40),
+  "Southern New England"  = str_pad(as.character(1:12), width = 2, pad = "0", side = "left"),
+  "Mid-Atlantic Bight"    = as.character(61:76))
+
+# Assign Areas by Strata
+survey_strata <- survey_strata %>% 
+  mutate(
+    strata = str_pad(strata, width = 5, pad = "0", side = "left"),
+    strata_num = str_sub(strata, 3, 4),
+    area = case_when(
+      strata_num %in% strata_key$`Georges Bank` ~ "Georges Bank",
+      strata_num %in% strata_key$`Gulf of Maine` ~ "Gulf of Maine",
+      strata_num %in% strata_key$`Southern New England` ~ "Southern New England",
+      strata_num %in% strata_key$`Mid-Atlantic Bight` ~ "Mid-Atlantic Bight",
+    TRUE ~ "Outside Major Study Areas")) %>% 
+  select(finstr_id, strata, strata_num, area, a2, str2, set, stratuma, str3, geometry)
+```
+
+**Mapping the Trawl Regions:**
+
+```{r}
+# Map it against the coastline
+ggplot() +
+  geom_sf(data = new_england, size = 0.3) +
+  geom_sf(data = canada, size = 0.3) +
+  geom_sf(data = survey_strata, aes(fill = area)) +
+  coord_sf(xlim = c(-77, -64.5), ylim = c(34.4, 45.75), expand = FALSE) +
+  guides(fill = guide_legend(nrow = 2)) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  map_theme +
+  labs(subtitle = "Trawl Survey Regions")
+
+```
+
+**Subset to Gulf of Maine:**
+
+```{r}
+nefsc_gom <- nefsc_clean %>% 
+  filter(survey_area == "GoM")
+```
+
+
+### Assigning Lobster Strata
+
+Unfortunately the trawl survey and the surveys for lobster abundances are done using a different area stratification. To perform a more direct comparison among areas we reassign the trawl stations based on where they fall within the lobster survey strata.
+
+#### Loading Strata
+
+```{r}
+# Lobster Strata
+lobstrata <- read_sf(paste0(res_path, "Shapefiles/Statistical_Areas/Statistical_Areas_2010_withNames.shp"))
+lobstrata <- rename_all(lobstrata, tolower)
+
+# Subset the ones in GOM to plot faster
+lobstrata_gom <- filter(lobstrata, id %in% c(464:467, 511:515, 521, 522, 526, 551, 561))
+
+
+# Map against the Coast
+ggplot() +
+  geom_sf(data = new_england, size = 0.3) +
+  geom_sf(data = canada, size = 0.3) +
+  geom_sf(data = lobstrata_gom, fill = "transparent", show.legend = FALSE) +
+  coord_sf(xlim = c(-71.5, -64.5), ylim = c(41.5, 45.75), expand = FALSE) +
+  map_theme +
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  labs(subtitle = "Lobster Strata in the Gulf of Maine")
+```
+
+#### Strata Re-assignment
+
+The reassignment is done by overlaying the starting locations for the trawl stations with the survey strata. Each station is assigned based on which strata is falls within. From there we can estimated area-weighted catch rates within each of them.
+
+**Strata Re-assignment function:**
+
+```{r}
+# Assign statistical zone from new sf for stat zones
+assign_stat_zones <- function(survdat, zone_sf, strata_col_in = "id", strata_col_out = "stat_zone", keep_NA = FALSE){
+  
+  # Transfer to shorthand names
+  x <- as.data.frame(survdat)
+  out_name_sym <- sym(strata_col_out)
+  
+  # use only station data for overlay/intersection
+  stations <- distinct(x, cruise6, stratum, station, decdeg_beglat, decdeg_beglon)
+  
+  # Convert stations to sf
+  stations_sf <- st_as_sf(stations, coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326, remove = FALSE)
+  
+  # Project to Lambert Conformal Conic
+  lcc <- st_crs("+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-72 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0 ") 
+  stations_sf <- st_transform(stations_sf, crs = lcc)
+  
+  # Prepare statistical zones in same CRS
+  stratum <- st_transform(lobstrata, crs = lcc)
+  
+  # rename stratum column to match desired label
+  names(stratum)[which(names(stratum) == strata_col_in)] <- strata_col_out
+  
+  # Identify points within each polygon/strata
+  stations_sf <- st_join(stations_sf, stratum, join = st_within, left = TRUE)
+  
+  # Don't need to convert back b/c we kept coordinates
+  stations_wgs <- st_drop_geometry(stations_sf)
+  
+  # Keep NA's or not?
+  if(keep_NA == F){ stations_wgs <- filter(stations_wgs, is.na({{out_name_sym}}) == FALSE)}
+  
+  # Join station assignments back into full data
+  out <- right_join(stations_wgs, x, by = c('cruise6', 'stratum', 'station', "decdeg_beglat", "decdeg_beglon")) %>% 
+    mutate({{out_name_sym}} := as.character({{out_name_sym}}))
+
+  # return the table
+  return(out)
+  
+  }
+
+```
+
+**Assigning Lobster Strata:**
+
+```{r}
+# Assign those zones!
+nefsc_lobsta_zones <- assign_stat_zones(survdat = nefsc_gom, 
+                                        zone_sf = select(lobstrata, id, short_name, geometry), 
+                                        strata_col_in = "id", 
+                                        strata_col_out = "lobster_strata",
+                                        keep_NA = FALSE)
+```
+
+**Validate by Mapping:**
+
+```{r}
+# make sf to check
+gom_dat_sf <- nefsc_lobsta_zones %>% 
+  distinct(decdeg_beglon, decdeg_beglat, lobster_strata) %>% 
+  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326) 
+
+# map check
+ggplot() +
+  geom_sf(data = gom_dat_sf, aes(color = lobster_strata)) +
+  geom_sf(data = lobstrata, fill = "transparent") +
+  geom_sf(data = new_england, size = 0.3) +
+  geom_sf(data = canada, size = 0.3) +
+  coord_sf(xlim = c(-71, -65.8), ylim = c(41, 44.5)) +
+  map_theme +
+  theme(legend.position = "bottom") + 
+  guides(color = guide_legend("Lobster Strata", title.position = "top", title.hjust = 0.5))
+```
+
+**Drop Strata with Incomplete Representation:**
+
+
+```{r}
+gom_dat <- nefsc_lobsta_zones %>% 
+  filter(survey_area == "GoM",
+         lobster_strata %not in% c(561, 522, 551, 526, 466, 467),
+         is.na(lobster_strata) == FALSE)
+```
+
+**Validate by Mapping:**
+
+```{r}
+# make sf to check
+gom_dat_sf_2 <- gom_dat %>% 
+  distinct(decdeg_beglon, decdeg_beglat, lobster_strata) %>% 
+  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326) 
+
+# map check
+ggplot() +
+  geom_sf(data = gom_dat_sf_2, aes(color = lobster_strata)) +
+  geom_sf(data = lobstrata, fill = "transparent") +
+  geom_sf(data = new_england, size = 0.3) +
+  geom_sf(data = canada, size = 0.3) +
+  coord_sf(xlim = c(-71, -65.8), ylim = c(41, 44.5)) +
+  map_theme +
+  theme(legend.position = "bottom") + 
+  guides(color = guide_legend("Lobster Strata", title.position = "top", title.hjust = 0.5))
+```
+
+
+### Getting the Areas of Strata
+
+To weight the catch rates of each stratum against one-another, they are weighted using their interior areas in square kilometers.
+
+```{r}
+#### Get Stratum Area in km2  ####
+
+# Lambert Conformal Conic
+lcc <- st_crs("+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-72 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0 ")
+lobstrata_lcc <- st_transform(lobstrata, lcc)
+
+# Get areas
+# rename the id column to match nefsc_lobsta
+# drop geometry
+zone_areas <- lobstrata_lcc %>% 
+  rename(lobster_strata = id) %>% 
+  mutate(lobster_strata = as.character(lobster_strata),
+         area_m2 = st_area(lobstrata_lcc),
+         area_km2 = units::set_units(area_m2, "km^2"),
+         area_km2 = as.numeric(area_km2)) %>% 
+  select(lobster_strata, area_km2) %>% 
+  st_drop_geometry()
+
+
+# merge in the areas
+gom_weights <- left_join(gom_dat, zone_areas, by = "lobster_strata")
+
+
+# Bar plot for area of each
+gom_weights %>% 
+  distinct(lobster_strata, area_km2) %>% 
+  ggplot(aes(x = area_km2, fct_reorder(lobster_strata, as.numeric(area_km2)), fill = lobster_strata)) +
+  geom_col() +
+  scale_x_continuous(labels = comma_format()) +
+  labs(y = "Lobster Strata", x = "Area (km^2)", fill = "Lobster Strata")
+```
+
+
+### Estimate Area-Stratified Catch
+
+Area-stratified catch estimates are an approach that uses strata specific catch rates which are weighted by their overall size.
+
+**Area Stratification Function:**
+
+```{r}
+stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col){
+  
+  # https://noaa-edab.github.io/survdat/articles/calc_strat_mean.html
+  
+ # # Testing:
+ #  area_label <- "lobster_strata"
+ #  area_col <- "area_km2"
+ 
+  # column symbols from strings
+  label_sym <- sym(area_label)
+  areas_sym <- sym(area_col)
+  
+  ####  1. Set Constants: 
+  # Area covered by an albatross standard tow in km2
+  alb_tow_km2 <- 0.0384
+  # catchability coefficient - ideally should change for species guilds
+  q <- 1
+  
+  
+  ####  2. Stratum Area & Effort Ratios 
+  # Get Annual Stratum Effort, and Area Ratios
+  # The number of tows in each stratum by year
+  # area of a stratum relative to total area of all stratum sampled that year
+  
+  # Get Total area of all strata sampled in each year
+  total_stratum_areas <- group_by(survdat_weights, est_year)
+  total_stratum_areas <- distinct(total_stratum_areas, {{label_sym}}, .keep_all = T)
+  total_stratum_areas <- summarise(total_stratum_areas,
+                                   tot_s_area =  sum({{areas_sym}}, na.rm = T),
+                                   .groups = "drop")
+  
+  
+  # Calculate strata area relative to total area i.e. stratio or stratum weights
+  survdat_weights <- left_join(survdat_weights, total_stratum_areas, by = "est_year")
+  survdat_weights <- mutate(survdat_weights, 
+                                   st_ratio = {{areas_sym}} / tot_s_area,
+                                   st_ratio = as.numeric(st_ratio))
+  
+  
+  # We have total areas, now we want effort within each
+  # Number of unique tows per stratum, within each season
+  yr_strat_effort <- group_by(survdat_weights, est_year, season, {{label_sym}})
+  yr_strat_effort <- summarise(yr_strat_effort, strat_ntows = n_distinct(id), .groups = "drop")
+  
+  # Add those yearly effort counts back for later
+  # (area stratified abundance)
+  survdat_weights <- left_join(survdat_weights, yr_strat_effort, 
+                               by = c("est_year", "season", area_label))
+  
+  
+  
+  
+  ####  4. Derived Stratum Area Estimates
+  
+ 
+  #. A. Catch per tow
+  survdat_weights <- survdat_weights %>% 
+    mutate(
+      # Length Based:
+      # Catch / tow, for that year & season group
+      abund_tow_s   = numlen_adj / strat_ntows,
+      # length based: biomass / tow
+      lwbio_tow_s = sum_weight_kg / strat_ntows,
+      
+      # Not Length Based: 
+      # Aggregate biomass is repeated across length classes for each station for each species
+      # the number of length classes is tallied in the cleanup code-
+      # where the conversion factor is done
+      biom_per_lclass = (biomass_kg / n_len_class),
+      biom_tow_s = biom_per_lclass / strat_ntows)
+      
+  
+  # B. Stratified Mean Catch Rates 
+  # (catch rate, weighted by relative size of stratum)
+  # stratum area : area of all stratum sampled that season
+  survdat_weights <-  survdat_weights %>% 
+    mutate(
+      # Length Based:
+      # Stratified mean abundance CPUE
+      strat_mean_abund_s = abund_tow_s * st_ratio,
+      # Stratified mean LW Biomass
+      strat_mean_lwbio_s = lwbio_tow_s * st_ratio,
+      
+      # Not length based:
+      # Stratified mean BIOMASS CPUE
+      strat_mean_biom_s = biom_tow_s * st_ratio)
+  
+  
+  # C. Stratified Total Abundance/Biomass
+  # convert from catch rate by area swept to total catch for entire stratum
+  survdat_weights <-  survdat_weights %>% 
+    mutate(
+      # Length Based:
+      # Total Abundance
+      strat_total_abund_s = round((strat_mean_abund_s * tot_s_area / alb_tow_km2) / q),
+    
+      # Two options for to estimate lw biomass
+      # Result is the same 4/20/2021
+      # Option 1: Individual LW Biomass * expanded abundance at length
+      strat_total_lwbio_s = (ind_weight_kg * strat_total_abund_s) / q,
+      # # Option 2: Size specific lw biomass / tow, expanded to total area
+      # strat_total_lwbio_s  = (strat_mean_lwbio_s * tot_s_area / alb_tow_km2) / q
+      
+      # Not Length Based:
+      # Total BIOMASS from the biomass of all lengths
+      strat_total_biom_s = (strat_mean_biom_s * tot_s_area / alb_tow_km2) / q)
+  
+}
+```
+
+
+**Run Stratification:**
+
+```{r}
+# Run stratification
+gom_strat <- stratify_lobster_strata_catch(survdat_weights = gom_weights, 
+                                           area_label = "lobster_strata", 
+                                           area_col = "area_km2")
+
+
+# Tidy up?
+# there are now two different "stratum columns" floating around
+gom_strat <- gom_strat %>% 
+  select(-c(strat_num, stratum, nafodiv, full_name, 
+            st_ratio, strat_ntows, biom_per_lclass)) 
+
+```
+
+
+### Pull Predator Complex
+
+The last step before estimating any of the indices is to pull out the species that prey on lobster
+
+```{r}
+lobster_predators <- c(
+  "atlantic halibut",
+  "atlantic wolffish",
+  "barndoor skate",
+  "black sea bass",
+  "atlantic cod",
+  "fourspot flounder",
+  "haddock",
+  "little skate",
+  "longhorn sculpin",
+  "ocean pout",
+  "red hake",
+  "sea raven",
+  "silver hake",
+  "smooth skate",
+  "spiny dogfish",
+  "spotted hake",
+  "thorny skate",
+  "white hake",
+  "winter flounder"
+)
+
+
+# Filter
+gom_predators <- gom_strat %>% 
+  filter(comname %in% lobster_predators) %>% 
+  mutate(lobster_pred = "lobster predator")
+```
+
+
+## Summarize Predator Patterns
+
+Depending on whether we are looking at metrics on individuals (bodysize) or across individuals (total fishes, total biomasses) there is a need to either weight/un-weight the averaging for these summaries.
+
+
+```{r}
+# get stratified mean abundances
+predator_summs <- gom_predators %>% 
+  bind_rows(gom_predators %>% mutate(season = "Both")) %>% 
+  group_by(est_year, season, lobster_strata, lobster_pred) %>% 
+  summarise(
+    # station details
+    `station total` = n_distinct(id),
+    # Survey totals
+    `total fish` = sum(numlen_adj),
+    `total biomass (kg)` = sum(sum_weight_kg),
+    
+    # Survey Means
+    `average abundance` = mean(numlen_adj),
+    `mean weight (kg)` = weighted.mean(ind_weight_kg, numlen_adj),
+    `mean length (cm)` = weighted.mean(length_cm, numlen_adj),
+    #  Stratified Means
+    # Should these averages be weighted by the number of fish caught?
+    `stratified mean abundance` = mean(strat_mean_abund_s),
+    `stratified mean biomass (kg)` = mean(strat_mean_lwbio_s),
+    `strat-abund weighted mean abundance` = weighted.mean(strat_mean_abund_s, strat_total_abund_s),
+    `strat-abund weighted mean biomass (kg)` = weighted.mean(strat_mean_lwbio_s, strat_total_abund_s),
+    # Average Sizes
+    
+    `stratified mean length (cm)` = weighted.mean(length_cm, strat_total_abund_s),
+    
+    `stratified mean weight (kg)` = weighted.mean(ind_weight_kg, strat_total_abund_s),
+    # Stratified Totals
+    `stratified total abundance` = sum(strat_total_abund_s),
+    `stratified total biomass (kg)` = sum(strat_total_lwbio_s),
+            .groups = "drop") %>% 
+  mutate(season = factor(season, levels = c("Spring", "Fall", "Both")))
+
+```
+
+
+## Assess Predator Indices {.tabset .tabset-pills}
+
+To look at metrics over time we can plot each season or the aggregate of both against one another:
+
+**Plotting Function:**
+
+```{r}
+# Stop re-typing code
+plot_pred_index <- function(pred_dat, col_select = "stratified total biomass (kg)"){
+  col_sym <- sym(col_select)
+  ggplot(pred_dat, aes(x = est_year, y = {{col_sym}}, color = season)) +
+    geom_line(alpha = 0.2) +
+    geom_point(alpha = 0.6, size = 1) +
+    geom_smooth(formula = y~x, method = "loess") + 
+    scale_color_gmri() +
+    facet_grid(lobster_strata~season, scales = "free") + 
+    scale_y_continuous(labels = scales::comma_format()) +
+    labs(x = "", y = str_replace_all(col_select, "_", " "),
+         subtitle = str_c("Lobster Predator Complex: \n", str_to_title(col_select))) +
+    theme(legend.position = "right",
+          axis.text.x = element_text(angle = 45, hjust = 1)) +
+    guides(color = guide_legend(title = "Season", title.position = "top", title.hjust = 0.5))
+  
+}
+```
+
+
+
+
+### Abundance {.tabset}
+
+#### Observed
+
+```{r}
+plot_pred_index(predator_summs, col_select = "total fish")
+```
+
+#### Stratified
+
+```{r}
+plot_pred_index(predator_summs, col_select = "stratified total abundance")
+```
+
+### Biomass {.tabset}
+
+#### Observed
+
+```{r}
+plot_pred_index(predator_summs, col_select = "total biomass (kg)")
+```
+
+#### Stratified
+
+```{r}
+plot_pred_index(predator_summs, col_select = "stratified total biomass (kg)")
+```
+
+### Length {.tabset}
+
+#### Observed
+
+```{r}
+plot_pred_index(predator_summs, col_select = "mean length (cm)")
+```
+
+#### Stratified
+
+```{r}
+plot_pred_index(predator_summs, col_select = "stratified mean length (cm)")
+```
+
+### Weight {.tabset}
+
+#### Observed
+
+```{r}
+plot_pred_index(predator_summs, col_select = "mean weight (kg)")
+```
+
+#### Stratified
+
+```{r}
+plot_pred_index(predator_summs, col_select = "stratified mean weight (kg)")
+```
+
+
+
+
+`r insert_gmri_footer()`
+
+
