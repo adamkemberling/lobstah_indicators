@@ -24,7 +24,6 @@ library(sf)
 library(tidyverse)
 library(targets)
 library(gmRi)
-# library(ggforce)
 library(scales)
 
 # paths
@@ -279,7 +278,7 @@ ggplot() +
 ```
 
 
-### Getting the Areas of Strata
+### Calculate the Areas of Strata
 
 To weight the catch rates of each stratum against one-another, they are weighted using their interior areas in square kilometers.
 
@@ -373,13 +372,9 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
   survdat_weights <- left_join(survdat_weights, yr_strat_effort, 
                                by = c("est_year", "season", area_label))
   
-  
-  
-  
   ####  4. Derived Stratum Area Estimates
   
- 
-  #. A. Catch per tow
+  ## A. Catch per tow
   survdat_weights <- survdat_weights %>% 
     mutate(
       # Length Based:
@@ -396,7 +391,7 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
       biom_tow_s = biom_per_lclass / strat_ntows)
       
   
-  # B. Stratified Mean Catch Rates 
+  ## B. Stratified Mean Catch Rates 
   # (catch rate, weighted by relative size of stratum)
   # stratum area : area of all stratum sampled that season
   survdat_weights <-  survdat_weights %>% 
@@ -412,7 +407,7 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
       strat_mean_biom_s = biom_tow_s * st_ratio)
   
   
-  # C. Stratified Total Abundance/Biomass
+  ## C. Stratified Total Abundance/Biomass
   # convert from catch rate by area swept to total catch for entire stratum
   survdat_weights <-  survdat_weights %>% 
     mutate(
@@ -431,7 +426,12 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
       # Total BIOMASS from the biomass of all lengths
       strat_total_biom_s = (strat_mean_biom_s * tot_s_area / alb_tow_km2) / q)
   
+  
+  
+  ## D. abundance/biomass per km instead of relative weights?
+  
 }
+
 ```
 
 
