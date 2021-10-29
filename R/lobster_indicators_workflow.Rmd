@@ -243,9 +243,18 @@ ggplot() +
   geom_sf(data = canada, size = 0.3) +
   coord_sf(xlim = c(-71, -65.8), ylim = c(41, 44.5)) +
   map_theme +
-  theme(legend.position = "bottom") + 
+  theme(legend.position = "bottom") +
   guides(color = guide_legend("Lobster Strata", title.position = "top", title.hjust = 0.5))
 ```
+
+####  Reducing to Select Strata
+
+For this analysis we want three main strata, and one aggregate of the three.
+ - 511   
+ - 512   
+ - 513   
+ 
+ These align with our other nearshore-focused indicators.
 
 **Drop Strata with Incomplete Representation:**
 
@@ -253,7 +262,8 @@ ggplot() +
 ```{r}
 gom_dat <- nefsc_lobsta_zones %>% 
   filter(survey_area == "GoM",
-         lobster_strata %not in% c(561, 522, 551, 526, 466, 467),
+         lobster_strata %in% c(511:513),
+         #lobster_strata %not in% c(561, 522, 551, 526, 466, 467),
          is.na(lobster_strata) == FALSE)
 ```
 
@@ -273,7 +283,7 @@ ggplot() +
   geom_sf(data = canada, size = 0.3) +
   coord_sf(xlim = c(-71, -65.8), ylim = c(41, 44.5)) +
   map_theme +
-  theme(legend.position = "bottom") + 
+  theme(legend.position = "bottom") +
   guides(color = guide_legend("Lobster Strata", title.position = "top", title.hjust = 0.5))
 ```
 
@@ -308,6 +318,7 @@ gom_weights <- left_join(gom_dat, zone_areas, by = "lobster_strata")
 
 # Bar plot for area of each
 gom_weights %>% 
+  bind_rows(gom_weights %>% mutate(lobster_strata = "All Strata", area_km2 = sum(unique(gom_weights$area_km2)))) %>% 
   distinct(lobster_strata, area_km2) %>% 
   ggplot(aes(x = area_km2, fct_reorder(lobster_strata, as.numeric(area_km2)), fill = lobster_strata)) +
   geom_col() +
@@ -318,11 +329,16 @@ gom_weights %>%
 
 ### Estimate Area-Stratified Catch
 
-Area-stratified catch estimates are an approach that uses strata specific catch rates which are weighted by their overall size.
+Area-stratified catch estimates are an approach that uses strata specific catch rates which are weighted by their overall size. This should be done before any species are filtered to make sure stations are not dropped by filtering out to a subset of species. At this point all the stations are in the data, and we need them to get effort correct.
+
+Since we already reduced the potential area to these three strata, the total station count within a year is only for our area of interest. This will let us weight the three strata properly for getting the catch rates within the aggregate stratum.
 
 **Area Stratification Function:**
 
 ```{r}
+
+
+# added some tweaks to do catch rates in km2, and expand from there
 stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col){
   
   # https://noaa-edab.github.io/survdat/articles/calc_strat_mean.html
@@ -333,7 +349,7 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
  
   # column symbols from strings
   label_sym <- sym(area_label)
-  areas_sym <- sym(area_col)
+  area_km_sym <- sym(area_col)
   
   ####  1. Set Constants: 
   # Area covered by an albatross standard tow in km2
@@ -347,18 +363,18 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
   # The number of tows in each stratum by year
   # area of a stratum relative to total area of all stratum sampled that year
   
-  # Get Total area of all strata sampled in each year
+  # Get Total area of all strata sampled in each year (one each)
   total_stratum_areas <- group_by(survdat_weights, est_year)
   total_stratum_areas <- distinct(total_stratum_areas, {{label_sym}}, .keep_all = T)
   total_stratum_areas <- summarise(total_stratum_areas,
-                                   tot_s_area =  sum({{areas_sym}}, na.rm = T),
+                                   tot_s_area =  sum({{area_km_sym}}, na.rm = T),
                                    .groups = "drop")
   
   
   # Calculate strata area relative to total area i.e. stratio or stratum weights
   survdat_weights <- left_join(survdat_weights, total_stratum_areas, by = "est_year")
   survdat_weights <- mutate(survdat_weights, 
-                                   st_ratio = {{areas_sym}} / tot_s_area,
+                                   st_ratio = {{area_km_sym}} / tot_s_area,
                                    st_ratio = as.numeric(st_ratio))
   
   
@@ -373,62 +389,82 @@ stratify_lobster_strata_catch <- function(survdat_weights, area_label, area_col)
                                by = c("est_year", "season", area_label))
   
   ####  4. Derived Stratum Area Estimates
+  # All of the following are done based on size classes
   
   ## A. Catch per tow
   survdat_weights <- survdat_weights %>% 
     mutate(
-      # Length Based:
+      
+      # Length Based :
       # Catch / tow, for that year & season group
       abund_tow_s   = numlen_adj / strat_ntows,
       # length based: biomass / tow
       lwbio_tow_s = sum_weight_kg / strat_ntows,
       
       # Not Length Based: 
-      # Aggregate biomass is repeated across length classes for each station for each species
-      # the number of length classes is tallied in the cleanup code-
-      # where the conversion factor is done
       biom_per_lclass = (biomass_kg / n_len_class),
       biom_tow_s = biom_per_lclass / strat_ntows)
-      
   
-  ## B. Stratified Mean Catch Rates 
-  # (catch rate, weighted by relative size of stratum)
-  # stratum area : area of all stratum sampled that season
-  survdat_weights <-  survdat_weights %>% 
+  
+  ## B. Catch per km
+  survdat_weights <- survdat_weights %>% 
     mutate(
-      # Length Based:
-      # Stratified mean abundance CPUE
-      strat_mean_abund_s = abund_tow_s * st_ratio,
-      # Stratified mean LW Biomass
-      strat_mean_lwbio_s = lwbio_tow_s * st_ratio,
-      
-      # Not length based:
-      # Stratified mean BIOMASS CPUE
-      strat_mean_biom_s = biom_tow_s * st_ratio)
+      # Number / km2
+      `abundance per km2` = abund_tow_s / alb_tow_km2,
+      # kg / km2
+      `kg per km2` = `lwbio_tow_s` / alb_tow_km2,
+  )
   
   
   ## C. Stratified Total Abundance/Biomass
-  # convert from catch rate by area swept to total catch for entire stratum
-  survdat_weights <-  survdat_weights %>% 
+  survdat_weights <- survdat_weights %>% 
     mutate(
-      # Length Based:
-      # Total Abundance
-      strat_total_abund_s = round((strat_mean_abund_s * tot_s_area / alb_tow_km2) / q),
-    
-      # Two options for to estimate lw biomass
-      # Result is the same 4/20/2021
-      # Option 1: Individual LW Biomass * expanded abundance at length
-      strat_total_lwbio_s = (ind_weight_kg * strat_total_abund_s) / q,
-      # # Option 2: Size specific lw biomass / tow, expanded to total area
-      # strat_total_lwbio_s  = (strat_mean_lwbio_s * tot_s_area / alb_tow_km2) / q
+      ####  Area Extrapolations
+      # Number of Individuals (Expected for entire stratum, based on density)
+      `strat total abund` = `abundance per km2` * {{area_km_sym}},
+      # Sum(bodymass) of Individuals (Expected for entire stratum, based on density)
+      `strat total biomass (kg)` = `kg per km2` * {{area_km_sym}}
+ )
+  
       
-      # Not Length Based:
-      # Total BIOMASS from the biomass of all lengths
-      strat_total_biom_s = (strat_mean_biom_s * tot_s_area / alb_tow_km2) / q)
+  #### This section is for weighting stratified means, don't need here
+  # ## D. Area weighted catch rates
+  # # (catch rate, weighted by relative size of stratum)
+  # # stratum area : area of all stratum sampled that season
+  # survdat_weights <-  survdat_weights %>% 
+  #   mutate(
+  #     
+  #     # Length Based:
+  #     # Stratified mean abundance CPUE
+  #     strat_mean_abund_s = abund_tow_s * st_ratio,
+  #     # Stratified mean LW Biomass
+  #     strat_mean_lwbio_s = lwbio_tow_s * st_ratio,
+  #     
+  #     # Not length based:
+  #     # Stratified mean BIOMASS CPUE
+  #     strat_mean_biom_s = biom_tow_s * st_ratio)
+  # 
+  # 
+  # # Extrapolated Catch Totals from area-weighted rates
+  # # convert from catch rate by area swept to total catch for entire stratum
+  # survdat_weights <-  survdat_weights %>% 
+  #   mutate(
+  #     # Length Based:
+  #     # Total Abundance
+  #     strat_total_abund_s = round((strat_mean_abund_s * tot_s_area / alb_tow_km2) / q),
+  #   
+  #     # # Two options for to estimate lw biomass | Result is the same 4/20/2021
+  #     #
+  #     # Option 1: Individual LW Biomass * expanded abundance at length
+  #     strat_total_lwbio_s = (ind_weight_kg * strat_total_abund_s) / q,
+  #     
+  #     # # Option 2: Size specific lw biomass / tow, expanded to total area
+  #     # strat_total_lwbio_s  = (strat_mean_lwbio_s * tot_s_area / alb_tow_km2) / q
+  #     
+  #     # Not Length Based:
+  #     # Total BIOMASS from the biomass of all lengths
+  #     strat_total_biom_s = (strat_mean_biom_s * tot_s_area / alb_tow_km2) / q)
   
-  
-  
-  ## D. abundance/biomass per km instead of relative weights?
   
 }
 
@@ -447,17 +483,17 @@ gom_strat <- stratify_lobster_strata_catch(survdat_weights = gom_weights,
 # Tidy up?
 # there are now two different "stratum columns" floating around
 gom_strat <- gom_strat %>% 
-  select(-c(strat_num, stratum, nafodiv, full_name, 
-            st_ratio, strat_ntows, biom_per_lclass)) 
+  select(-c(strat_num, stratum, nafodiv, full_name)) 
 
 ```
 
 
 ### Pull Predator Complex
 
-The last step before estimating any of the indices is to pull out the species that prey on lobster
+The last step before estimating any of the indices is to pull out the species that prey on lobster. There are 19 species included in this list:
 
 ```{r}
+# List of species
 lobster_predators <- c(
   "atlantic halibut",
   "atlantic wolffish",
@@ -479,53 +515,136 @@ lobster_predators <- c(
   "white hake",
   "winter flounder"
 )
+```
 
 
+```{r}
 # Filter
 gom_predators <- gom_strat %>% 
-  filter(comname %in% lobster_predators) %>% 
-  mutate(lobster_pred = "lobster predator")
+  filter(comname %in% lobster_predators)
+
+# Make another copy with both seasons included
+gom_predators <- gom_predators %>% 
+  bind_rows(gom_predators %>% mutate(season = "Both"))
 ```
 
 
 ## Summarize Predator Patterns
 
-Depending on whether we are looking at metrics on individuals (bodysize) or across individuals (total fishes, total biomasses) there is a need to either weight/un-weight the averaging for these summaries.
+Depending on whether we are looking at metrics on individuals (bodysize) or across individuals (total fishes, total biomasses) there is a need to either weight/un-weight the averaging for these summaries. And an additional need for the aggregate strata to weight the contributions of each of its parts proportionally to their areas.
 
+**Individual Strata**
 
 ```{r}
-# get stratified mean abundances
-predator_summs <- gom_predators %>% 
-  bind_rows(gom_predators %>% mutate(season = "Both")) %>% 
-  group_by(est_year, season, lobster_strata, lobster_pred) %>% 
-  summarise(
-    # station details
-    `station total` = n_distinct(id),
-    # Survey totals
-    `total fish` = sum(numlen_adj),
-    `total biomass (kg)` = sum(sum_weight_kg),
-    
-    # Survey Means
-    `average abundance` = mean(numlen_adj),
-    `mean weight (kg)` = weighted.mean(ind_weight_kg, numlen_adj),
-    `mean length (cm)` = weighted.mean(length_cm, numlen_adj),
-    #  Stratified Means
-    # Should these averages be weighted by the number of fish caught?
-    `stratified mean abundance` = mean(strat_mean_abund_s),
-    `stratified mean biomass (kg)` = mean(strat_mean_lwbio_s),
-    `strat-abund weighted mean abundance` = weighted.mean(strat_mean_abund_s, strat_total_abund_s),
-    `strat-abund weighted mean biomass (kg)` = weighted.mean(strat_mean_lwbio_s, strat_total_abund_s),
-    # Average Sizes
-    
-    `stratified mean length (cm)` = weighted.mean(length_cm, strat_total_abund_s),
-    
-    `stratified mean weight (kg)` = weighted.mean(ind_weight_kg, strat_total_abund_s),
-    # Stratified Totals
-    `stratified total abundance` = sum(strat_total_abund_s),
-    `stratified total biomass (kg)` = sum(strat_total_lwbio_s),
-            .groups = "drop") %>% 
-  mutate(season = factor(season, levels = c("Spring", "Fall", "Both")))
 
+# area of a tow
+ alb_tow_km2 <- 0.0384
+
+# Independent Strata Summaries:
+strata_summs <- gom_predators %>% 
+  group_by(est_year, season, lobster_strata) %>% 
+  summarise(
+    # Predator Indices (by lobster stratum):
+    #### Stratum Details
+    `stratum effort` = median(strat_ntows),
+    `stratum area` = median(area_km2),
+    
+    ####  Abundance Indices:
+    # Number of Individuals (Caught in Survey within stratum)
+    `stratum abundance`    = sum(numlen_adj),
+    `stratified abundance` = sum(`strat total abund`),
+    
+    ####  Biomass Indices:
+    # Sum(bodymass) of Individuals (Caught in Survey within stratum)
+    `stratum biomass (kg)`    = sum(sum_weight_kg),
+    `stratified biomass (kg)` =  sum(`strat total biomass (kg)`),
+    
+    ####  Size Indices: 
+    # Average Individual Size
+     # Average Individual Weight
+    `mean length (cm)` = weighted.mean(length_cm, numlen_adj),
+    `mean weight (kg)` = weighted.mean(ind_weight_kg, numlen_adj),
+  
+    ####  Weightings for the aggregate numbers
+    `aggregate area` = median(tot_s_area),
+    
+    .groups = "drop") %>% 
+  mutate(
+    `abundance km2` = `stratified abundance` / `stratum area`,
+    `biomass km2` = `stratified biomass (kg)` / `stratum area`,
+  )
+
+# glimpse(strata_summs)
+```
+
+
+
+
+**Stratum Aggregate:**
+
+```{r}
+# Same idea, but the strata is all of them?
+
+# Anywhere we took median above we need to actually pull out
+agg_areas <- gom_predators %>% 
+  mutate(lobster_strata = "Strata 511-513") %>% 
+  distinct(est_year, season, lobster_strata, strat_ntows, area_km2)
+
+# AND when taking averages across we want to weight them by relative area of stratum
+  
+
+# get stratified mean abundances/biomass
+aggregate_summs <- gom_predators %>% 
+  mutate(lobster_strata = "Strata 511-513") %>% 
+  select(-c(strat_ntows, area_km2)) %>% 
+  left_join(agg_areas, by = c("est_year", "season", "lobster_strata")) %>% 
+  group_by(est_year, season, lobster_strata) %>% 
+  summarise(
+    
+    # Predator Indices (by lobster stratum):
+    
+    #### Stratum Details
+    `stratum effort` = sum(strat_ntows),
+    `stratum area` = sum(area_km2),
+    
+    
+    ####  Abundance Indices:
+    # Number of Individuals (Caught in Survey within stratum)
+    `stratum abundance`    = sum(numlen_adj),
+    `stratified abundance` = sum(`strat total abund`),
+    
+    ####  Biomass Indices:
+    # Sum(bodymass) of Individuals (Caught in Survey within stratum)
+    `stratum biomass (kg)` = sum(sum_weight_kg),
+    `stratified biomass (kg)` = sum(`strat total biomass (kg)`),
+    
+    ####  Size Indices: 
+    # Average Individual Size
+    # Average Individual Weight
+    `mean length (cm)` = weighted.mean(length_cm, numlen_adj),
+    
+    `mean weight (kg)` = weighted.mean(ind_weight_kg, numlen_adj),
+  
+    ####  Weightings for the aggregate numbers
+    `aggregate area` = median(tot_s_area),
+    
+    .groups = "drop") %>% 
+  mutate(
+    `abundance km2` = `stratified abundance` / `stratum area`,
+    `biomass km2` = `stratified biomass (kg)` / `stratum area`,
+  )
+
+# glimpse(aggregate_summs)
+```
+
+
+**Re-join**
+
+```{r}
+# Join the independent strata summaries with the aggregate strata summary
+predator_summs <- bind_rows(list(strata_summs, aggregate_summs)) %>% 
+  mutate(season = factor(season, levels = c("Spring", "Fall", "Both")),
+         lobster_strata = factor(lobster_strata, levels = c("513", "512", "511", "Strata 511-513")))
 ```
 
 
@@ -563,13 +682,14 @@ plot_pred_index <- function(pred_dat, col_select = "stratified total biomass (kg
 #### Observed
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "total fish")
+
+plot_pred_index(predator_summs, col_select = "stratum abundance")
 ```
 
 #### Stratified
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "stratified total abundance")
+plot_pred_index(predator_summs, col_select = "stratified abundance")
 ```
 
 ### Biomass {.tabset}
@@ -577,13 +697,13 @@ plot_pred_index(predator_summs, col_select = "stratified total abundance")
 #### Observed
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "total biomass (kg)")
+plot_pred_index(predator_summs, col_select = "stratum biomass (kg)")
 ```
 
 #### Stratified
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "stratified total biomass (kg)")
+plot_pred_index(predator_summs, col_select = "stratified biomass (kg)")
 ```
 
 ### Length {.tabset}
@@ -597,7 +717,7 @@ plot_pred_index(predator_summs, col_select = "mean length (cm)")
 #### Stratified
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "stratified mean length (cm)")
+#plot_pred_index(predator_summs, col_select = "stratified mean length (cm)")
 ```
 
 ### Weight {.tabset}
@@ -611,10 +731,22 @@ plot_pred_index(predator_summs, col_select = "mean weight (kg)")
 #### Stratified
 
 ```{r}
-plot_pred_index(predator_summs, col_select = "stratified mean weight (kg)")
+# plot_pred_index(predator_summs, col_select = "stratified mean weight (kg)")
 ```
 
+### Densities {.tabset}
 
+#### Abundance / km2
+
+```{r}
+plot_pred_index(predator_summs, col_select = "abundance km2")
+```
+
+#### kg / km2
+
+```{r}
+plot_pred_index(predator_summs, col_select = "biomass km2")
+```
 
 
 `r insert_gmri_footer()`
