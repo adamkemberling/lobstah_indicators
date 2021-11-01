@@ -233,7 +233,7 @@ nefsc_lobsta_zones <- assign_stat_zones(survdat = nefsc_gom,
 # make sf to check
 gom_dat_sf <- nefsc_lobsta_zones %>% 
   distinct(decdeg_beglon, decdeg_beglat, lobster_strata) %>% 
-  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326) 
+  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326, remove = FALSE) 
 
 # map check
 ggplot() +
@@ -273,14 +273,17 @@ gom_dat <- nefsc_lobsta_zones %>%
 # make sf to check
 gom_dat_sf_2 <- gom_dat %>% 
   distinct(decdeg_beglon, decdeg_beglat, lobster_strata) %>% 
-  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326) 
+  st_as_sf(coords = c("decdeg_beglon", "decdeg_beglat"), crs = 4326, remove = FALSE) 
 
 # map check
 ggplot() +
-  geom_sf(data = gom_dat_sf_2, aes(color = lobster_strata)) +
-  geom_sf(data = lobstrata, fill = "transparent") +
   geom_sf(data = new_england, size = 0.3) +
   geom_sf(data = canada, size = 0.3) +
+  geom_sf(data = gom_dat_sf_2, aes(color = lobster_strata), show.legend = FALSE) +
+  ggforce::geom_mark_ellipse(data = gom_dat_sf_2, 
+                             aes(x = decdeg_beglon, y = decdeg_beglat, 
+                                 group = lobster_strata, label = lobster_strata), 
+                             color = "transparent", label.fill = "transparent") +
   coord_sf(xlim = c(-71, -65.8), ylim = c(41, 44.5)) +
   map_theme +
   theme(legend.position = "bottom") +
@@ -706,33 +709,21 @@ plot_pred_index(predator_summs, col_select = "stratum biomass (kg)")
 plot_pred_index(predator_summs, col_select = "stratified biomass (kg)")
 ```
 
-### Length {.tabset}
+### Mean Sizes {.tabset}
 
-#### Observed
+#### Length
 
 ```{r}
 plot_pred_index(predator_summs, col_select = "mean length (cm)")
 ```
 
-#### Stratified
-
-```{r}
-#plot_pred_index(predator_summs, col_select = "stratified mean length (cm)")
-```
-
-### Weight {.tabset}
-
-#### Observed
+#### Weight
 
 ```{r}
 plot_pred_index(predator_summs, col_select = "mean weight (kg)")
 ```
 
-#### Stratified
 
-```{r}
-# plot_pred_index(predator_summs, col_select = "stratified mean weight (kg)")
-```
 
 ### Densities {.tabset}
 
@@ -747,6 +738,29 @@ plot_pred_index(predator_summs, col_select = "abundance km2")
 ```{r}
 plot_pred_index(predator_summs, col_select = "biomass km2")
 ```
+
+## Export Predator Indicators
+
+```{r}
+
+# Pull out important columns
+predator_indices <- select(predator_summs,
+                           year = est_year,
+                           season = season,
+                           `stratum id` = lobster_strata,
+                           `mean length (cm)`,
+                           `mean weight (kg)`,
+                           `stratum abundance`,
+                           `stratum biomass (kg)`,
+                           `abundance km2`,
+                           `biomass km2`,
+                           `stratified abundance`,
+                           `stratified biomass (kg)`)
+
+# Export
+write_rds(predator_indices, here::here("data/nmfs_trawl_lobster_predator_indices.rdata"))
+```
+
 
 
 `r insert_gmri_footer()`
